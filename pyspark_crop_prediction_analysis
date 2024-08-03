@@ -1,0 +1,99 @@
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, count, when, isnull
+from pyspark.sql.types import NumericType, IntegerType, DoubleType, FloatType
+from pyspark.ml.feature import VectorAssembler
+from pyspark.ml.stat import Correlation
+from tabulate import tabulate
+import sys
+
+def main():
+    
+    # Initialise SparkSession
+    spark = SparkSession.builder.appName("CropPrediction").getOrCreate()
+
+    # Load the dataset
+    df = spark.read.csv("indiancrop_dataset.csv", header=True, inferSchema=True)
+    print("\nDataset loaded...")
+    print(f"\nRows: {df.count()}, \nColumns: {len(df.columns)}\n")
+    
+    print("Schema:")
+    df.printSchema()
+    
+    analyse_dataset(df)
+
+    # Check for imbalanced target variable
+    check_dataset_balance(df)
+
+    # Correlation Matrix
+    compute_correlation_matrix(df, spark)
+
+    # Shutdown Spark session
+    spark.stop()
+
+def analyse_dataset(df):
+    
+    print("Random sample of 5 rows from the dataset:")
+    df.sample(fraction=0.1, seed=42).limit(5).show(truncate=False)
+    #Analyze data quality
+    print("Null value counts:")
+    df.select([count(when(isnull(c), c)).alias(c) for c in df.columns]).show()
+    
+    # Basic statistics for numeric columns
+    numeric_cols = [f.name for f in df.schema.fields if isinstance(f.dataType, (IntegerType, DoubleType, FloatType))]
+    stats = df.select(numeric_cols).summary("count", "mean", "stddev", "min", "max").collect()
+    
+    # Prepare the data
+    headers = ["statistic"] + numeric_cols
+    stats_data = []
+    for row in stats:
+        row_data = [row["summary"]] + [row[col] for col in numeric_cols]
+        stats_data.append(row_data)
+
+    # Print formatted table
+    print("Basic statistics for numeric columns:")
+    print(tabulate(stats_data, headers=headers, floatfmt=".2f", tablefmt="grid"))
+    
+
+def check_dataset_balance(df, target_column='CROP'):
+    # Count total number of rows
+    total_count = df.count()
+
+    # Count occurrences of each crop
+    crop_counts = df.groupBy(target_column).agg(count('*').alias('count'))
+
+    # Calculate percentages
+    crop_percentages = crop_counts.withColumn('percentage', (col('count') / total_count) * 100)
+
+    # Sort by count in descending order
+    crop_distribution = crop_percentages.orderBy(col('count').desc())
+
+    # Show the results
+    print(f"\nDataset balance for column '{target_column}':")
+    crop_distribution.show(truncate=False)
+
+    # Calculate imbalance ratio
+    min_count = crop_distribution.agg({'count': 'min'}).collect()[0][0]
+    max_count = crop_distribution.agg({'count': 'max'}).collect()[0][0]
+    imbalance_ratio = max_count / min_count
+
+    print(f"\nImbalance ratio (max count / min count): {imbalance_ratio:.2f}")
+    
+def compute_correlation_matrix(df, spark):
+    
+    # Automatically select numeric columns
+    numeric_columns = [field.name for field in df.schema.fields if isinstance(field.dataType, NumericType)]
+
+    # Create a vector column of features
+    assembler = VectorAssembler(inputCols=numeric_columns, outputCol="features")
+    df_vector = assembler.transform(df).select("features")
+
+    # Compute correlation matrix
+    matrix = Correlation.corr(df_vector, "features")
+    
+    # Extract correlation matrix from the DataFrame
+    correlation_matrix = matrix.collect()[0]["pearson({})".format("features")].toArray()
+    
+    print("\nCorrelation Matrix:")
+    print(correlation_matrix)
+    
+
